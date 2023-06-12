@@ -4,69 +4,88 @@ use std::rc::Rc;
 pub type NodeCelled = Rc<RefCell<Node>>;
 
 #[derive(Debug, Clone)]
+pub struct NodeData {
+    cache: RefCell<Option<f32>>,
+    dependents: RefCell<Vec<NodeCelled>>,
+}
+
+impl NodeData {
+    fn clear_cache(&self) {
+        for dependent in self.dependents.borrow().iter() {
+            dependent.borrow_mut().data_mut().clear_cache();
+        }
+        *self.cache.borrow_mut() = None;
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Node {
     Input {
         x: RefCell<f32>,
-        dependents: RefCell<Vec<NodeCelled>>,
+        data: NodeData,
     },
-    Add {
+    Binary {
+        op: BinaryOp,
         a: NodeCelled,
         b: NodeCelled,
-        cache: RefCell<Option<f32>>,
-        dependents: RefCell<Vec<NodeCelled>>,
+        data: NodeData,
     },
-    Mul {
-        a: NodeCelled,
-        b: NodeCelled,
-        cache: RefCell<Option<f32>>,
-        dependents: RefCell<Vec<NodeCelled>>,
-    },
-    Sin {
+    Unary {
+        op: UnaryOp,
         x: NodeCelled,
-        cache: RefCell<Option<f32>>,
-        dependents: RefCell<Vec<NodeCelled>>,
+        data: NodeData,
     },
-    Pow {
-        a: NodeCelled,
-        b: NodeCelled,
-        cache: RefCell<Option<f32>>,
-        dependents: RefCell<Vec<NodeCelled>>,
-    },
+}
+
+#[derive(Debug, Clone)]
+pub enum BinaryOp {
+    Add,
+    Mul,
+    Pow,
+}
+
+#[derive(Debug, Clone)]
+pub enum UnaryOp {
+    Sin,
 }
 
 impl Node {
     pub fn create_input(x: f32) -> NodeCelled {
-        let res = Self::Input {
+        Rc::new(RefCell::new(Self::Input {
             x: RefCell::new(x),
-            dependents: RefCell::new(Vec::new()),
-        };
-
-        Rc::new(RefCell::new(res))
+            data: NodeData {
+                cache: RefCell::new(Some(x)),
+                dependents: RefCell::new(Vec::new()),
+            },
+        }))
     }
 
     pub fn create_add(a: NodeCelled, b: NodeCelled) -> NodeCelled {
-        let res = Self::Add {
-            a: a.clone(),
-            b: b.clone(),
-            cache: RefCell::new(None),
-            dependents: RefCell::new(Vec::new()),
-        };
-        let res = Rc::new(RefCell::new(res));
-
-        a.borrow_mut().add_dependent(res.clone());
-        b.borrow_mut().add_dependent(res.clone());
-
-        res
+        Self::create_binary_node(BinaryOp::Add, a, b)
     }
 
     pub fn create_mul(a: NodeCelled, b: NodeCelled) -> NodeCelled {
-        let res = Self::Mul {
+        Self::create_binary_node(BinaryOp::Mul, a, b)
+    }
+
+    pub fn create_sin(x: NodeCelled) -> NodeCelled {
+        Self::create_unary_node(UnaryOp::Sin, x)
+    }
+
+    pub fn create_pow(a: NodeCelled, b: NodeCelled) -> NodeCelled {
+        Self::create_binary_node(BinaryOp::Pow, a, b)
+    }
+
+    fn create_binary_node(op: BinaryOp, a: NodeCelled, b: NodeCelled) -> NodeCelled {
+        let res = Rc::new(RefCell::new(Self::Binary {
+            op,
             a: a.clone(),
             b: b.clone(),
-            cache: RefCell::new(None),
-            dependents: RefCell::new(Vec::new()),
-        };
-        let res = Rc::new(RefCell::new(res));
+            data: NodeData {
+                cache: RefCell::new(None),
+                dependents: RefCell::new(Vec::new()),
+            },
+        }));
 
         a.borrow_mut().add_dependent(res.clone());
         b.borrow_mut().add_dependent(res.clone());
@@ -74,126 +93,79 @@ impl Node {
         res
     }
 
-    pub fn create_sin(x: NodeCelled) -> NodeCelled {
-        let res = Self::Sin {
+    fn create_unary_node(op: UnaryOp, x: NodeCelled) -> NodeCelled {
+        let res = Rc::new(RefCell::new(Self::Unary {
+            op,
             x: x.clone(),
-            cache: RefCell::new(None),
-            dependents: RefCell::new(Vec::new()),
-        };
-        let res = Rc::new(RefCell::new(res));
+            data: NodeData {
+                cache: RefCell::new(None),
+                dependents: RefCell::new(Vec::new()),
+            },
+        }));
 
         x.borrow_mut().add_dependent(res.clone());
 
         res
     }
 
-    pub fn create_pow(a: NodeCelled, b: NodeCelled) -> NodeCelled {
-        let res = Self::Pow {
-            a: a.clone(),
-            b: b.clone(),
-            cache: RefCell::new(None),
-            dependents: RefCell::new(Vec::new()),
-        };
-        let res = Rc::new(RefCell::new(res));
-
-        a.borrow_mut().add_dependent(res.clone());
-        b.borrow_mut().add_dependent(res.clone());
-
-        res
-    }
-
     pub fn compute(&self) -> f32 {
-        self.get_cached_value().unwrap_or_else(|| {
-            let new_value = match self {
-                Node::Input { x, .. } => *x.borrow(),
-                Node::Add { a, b, .. } => Self::add(&*a.borrow(), &*b.borrow()),
-                Node::Mul { a, b, .. } => Self::mul(&*a.borrow(), &*b.borrow()),
-                Node::Sin { x, .. } => Self::sin(&*x.borrow()),
-                Node::Pow { a, b, .. } => Self::pow(&*a.borrow(), &*b.borrow()),
-            };
+        match self {
+            Self::Input { x, .. } => *x.borrow(),
+            Self::Binary { op, a, b, data } => {
+                let cached = *data.cache.borrow();
 
-            // To disable cache comment this line
-            self.save_to_cache(new_value);
+                if let Some(cached) = cached {
+                    cached
+                } else {
+                    let computed = match op {
+                        BinaryOp::Add => a.borrow().compute() + b.borrow().compute(),
+                        BinaryOp::Mul => a.borrow().compute() * b.borrow().compute(),
+                        BinaryOp::Pow => a.borrow().compute().powf(b.borrow().compute()),
+                    };
+                    *data.cache.borrow_mut() = Some(computed);
 
-            new_value
-        })
+                    computed
+                }
+            }
+            Self::Unary { op, x, data } => {
+                let cached = *data.cache.borrow();
+
+                if let Some(cached) = cached {
+                    cached
+                } else {
+                    let computed = match op {
+                        UnaryOp::Sin => x.borrow().compute().sin(),
+                    };
+                    *data.cache.borrow_mut() = Some(computed);
+
+                    computed
+                }
+            }
+        }
     }
 
     pub fn set(&self, new_value: f32) {
-        if let Self::Input { x, .. } = self {
+        if let Self::Input { x, data } = self {
             *x.borrow_mut() = new_value;
-
-            // To break cache comment this line
-            self.clear_cache();
+            data.clear_cache();
         } else {
             panic!("Can only set to \"Input\"");
         }
     }
 
-    fn add_dependent(&self, node: NodeCelled) {
-        let dependents = &mut *self.get_dependents().borrow_mut();
-
-        // To break cache comment this line
-        dependents.push(node);
+    fn add_dependent(&mut self, node: NodeCelled) {
+        self.data().dependents.borrow_mut().push(node);
     }
 
-    fn clear_cache(&self) {
+    fn data(&self) -> &NodeData {
         match self {
-            Node::Input { .. } => {}
-            Node::Add { cache, .. }
-            | Node::Mul { cache, .. }
-            | Node::Sin { cache, .. }
-            | Node::Pow { cache, .. } => *cache.borrow_mut() = None,
-        }
-
-        for dependent in &*self.get_dependents().borrow() {
-            dependent.borrow().clear_cache();
+            Self::Input { data, .. } | Self::Binary { data, .. } | Self::Unary { data, .. } => data,
         }
     }
 
-    fn get_dependents(&self) -> &RefCell<Vec<NodeCelled>> {
+    fn data_mut(&mut self) -> &mut NodeData {
         match self {
-            Node::Input { dependents, .. }
-            | Node::Add { dependents, .. }
-            | Node::Mul { dependents, .. }
-            | Node::Sin { dependents, .. }
-            | Node::Pow { dependents, .. } => dependents,
+            Self::Input { data, .. } | Self::Binary { data, .. } | Self::Unary { data, .. } => data,
         }
-    }
-
-    fn get_cached_value(&self) -> Option<f32> {
-        match self {
-            Node::Input { x, .. } => Some(*x.borrow()),
-            Node::Add { cache, .. }
-            | Node::Mul { cache, .. }
-            | Node::Sin { cache, .. }
-            | Node::Pow { cache, .. } => *cache.borrow(),
-        }
-    }
-
-    fn save_to_cache(&self, new_value: f32) {
-        match self {
-            Node::Input { .. } => {}
-            Node::Add { cache, .. }
-            | Node::Mul { cache, .. }
-            | Node::Sin { cache, .. }
-            | Node::Pow { cache, .. } => *cache.borrow_mut() = Some(new_value),
-        }
-    }
-
-    fn add(a: &Self, b: &Self) -> f32 {
-        a.compute() + b.compute()
-    }
-
-    fn mul(a: &Self, b: &Self) -> f32 {
-        a.compute() * b.compute()
-    }
-
-    fn sin(a: &Self) -> f32 {
-        a.compute().sin()
-    }
-
-    fn pow(a: &Self, b: &Self) -> f32 {
-        a.compute().powf(b.compute())
     }
 }
